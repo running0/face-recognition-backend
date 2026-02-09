@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import sqlite3
+import psycopg2
 import json
 from datetime import datetime
 import os
@@ -8,17 +8,17 @@ import os
 app = Flask(__name__, static_folder='.')
 CORS(app)
 
-# 数据库文件路径
-DB_FILE = 'quiz_results.db'
+# 数据库连接配置
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://face_recognition_db_5xpi_user:Ore2mZISqtaMnrbqEEmEQzugO9EtRtJ0@dpg-d64qerggjchc739u73lg-a/face_recognition_db_5xpi')
 
 def init_db():
     """初始化数据库"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS quiz_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             class_name TEXT NOT NULL,
             student_name TEXT NOT NULL,
             seat_number TEXT NOT NULL,
@@ -33,9 +33,7 @@ def init_db():
 
 def get_db_connection():
     """获取数据库连接"""
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DATABASE_URL)
 
 @app.route('/')
 def index():
@@ -63,7 +61,7 @@ def submit_result():
         
         cursor.execute('''
             INSERT INTO quiz_results (class_name, student_name, seat_number, score, answers, submit_time)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         ''', (
             user_info.get('class', ''),
             user_info.get('name', ''),
@@ -98,19 +96,19 @@ def get_stats():
         
         # 总参与人数
         cursor.execute('SELECT COUNT(*) as count FROM quiz_results')
-        total_count = cursor.fetchone()['count']
+        total_count = cursor.fetchone()[0]
         
         # 平均分
         cursor.execute('SELECT AVG(score) as avg_score FROM quiz_results')
-        avg_score = cursor.fetchone()['avg_score'] or 0
+        avg_score = cursor.fetchone()[0] or 0
         
         # 最高分
         cursor.execute('SELECT MAX(score) as max_score FROM quiz_results')
-        max_score = cursor.fetchone()['max_score'] or 0
+        max_score = cursor.fetchone()[0] or 0
         
         # 及格率（60分及以上）
         cursor.execute('SELECT COUNT(*) as count FROM quiz_results WHERE score >= 60')
-        pass_count = cursor.fetchone()['count']
+        pass_count = cursor.fetchone()[0]
         pass_rate = (pass_count / total_count * 100) if total_count > 0 else 0
         
         # 分数段分布
@@ -128,7 +126,9 @@ def get_stats():
             GROUP BY grade
             ORDER BY grade DESC
         ''')
-        score_distribution = [dict(row) for row in cursor.fetchall()]
+        score_distribution = []
+        for row in cursor.fetchall():
+            score_distribution.append({'grade': row[0], 'count': row[1]})
         
         # 题目错误率统计
         cursor.execute('SELECT answers FROM quiz_results')
@@ -136,7 +136,7 @@ def get_stats():
         
         question_stats = {}
         for row in all_answers:
-            answers = json.loads(row['answers'])
+            answers = json.loads(row[0])
             for i, is_correct in enumerate(answers):
                 if i not in question_stats:
                     question_stats[i] = {'correct': 0, 'wrong': 0}
@@ -191,7 +191,7 @@ def get_students():
         params = []
         
         if class_filter:
-            query += ' WHERE class_name = ?'
+            query += ' WHERE class_name = %s'
             params.append(class_filter)
         
         query += ' ORDER BY submit_time DESC'
@@ -203,11 +203,21 @@ def get_students():
         
         # 分页
         offset = (page - 1) * per_page
-        query += ' LIMIT ? OFFSET ?'
+        query += ' LIMIT %s OFFSET %s'
         params.extend([per_page, offset])
         
         cursor.execute(query, params)
-        students = [dict(row) for row in cursor.fetchall()]
+        students = []
+        for row in cursor.fetchall():
+            students.append({
+                'id': row[0],
+                'class_name': row[1],
+                'student_name': row[2],
+                'seat_number': row[3],
+                'score': row[4],
+                'answers': row[5],
+                'submit_time': row[6]
+            })
         
         conn.close()
         
@@ -233,7 +243,7 @@ def delete_student(id):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute('DELETE FROM quiz_results WHERE id = ?', (id,))
+        cursor.execute('DELETE FROM quiz_results WHERE id = %s', (id,))
         conn.commit()
         conn.close()
         
